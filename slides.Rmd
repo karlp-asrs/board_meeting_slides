@@ -21,15 +21,20 @@ When you click the **Knit** button a document will be generated that includes bo
 - Bullet 2
 - Bullet 3
 
-## Slide with R Output
-
-```{r cars, echo = TRUE}
-summary(cars)
+```{r}
+library(tidyr)
+library(ggplot2)
+library(stringr)
+pe_multiplier=seq(15,30,1)
+eps2750=2750/pe_multiplier
+eps2500=2500/pe_multiplier
+eps2250=2250/pe_multiplier
+eps2000=2000/pe_multiplier
+eps3000=3000/pe_multiplier
+eps3250=3250/pe_multiplier
+eps3500=3500/pe_multiplier
+cm=data.frame(pe_multiplier,eps2000,eps2250,eps2500,eps2750,eps3000,eps3250,eps3500)
+cmlong=gather(cm,"iso","Earnings_per_share",-pe_multiplier)
+cmlong$iso=str_sub(cmlong$iso,4)
+ggplot(cmlong,aes(y=Earnings_per_share,x=pe_multiplier,group=iso,color=iso))+geom_line()
 ```
-
-## Slide with Plot
-
-```{r pressure}
-plot(pressure)
-```
-
