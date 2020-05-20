@@ -1,0 +1,305 @@
+---
+title: "Private Benchmark Capture"
+author: "Investment Management Division"
+output:
+  pdf_document: null
+  df_print: kable
+  html_document:
+    df_print: paged
+fig_width: 7.5
+fontsize: 11pt
+geometry:
+- margin=1in
+- top=1in
+- bottom=1in
+header-includes: \usepackage{caption}
+latex_engine: xelatex
+fig_height: 4.5
+classoption: onecolumn
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE)
+options(tinytex.verbose = TRUE)
+options(knitr.kable.NA = '')
+
+library(xts)
+library(lubridate)
+library(reshape2)
+library(scales)
+library(knitr)
+library(gridExtra)
+library(kableExtra)
+library(xtable)
+library(magrittr)
+library(ggpubr)
+library(ggrepel)
+library(grid)
+library(asrsMethods)
+library(asrsPalettes)
+library(readxl)
+library(tbl2xts)
+library(htmlTable)
+library(htmltools)
+library(Rblpapi)
+library(tidyverse)
+
+options(scipen = 999)
+# ___________ actually don't need these ___________
+# load("P:/IMD/2018 Database Project/RDS/Functions.RData")
+# load("P:/IMD/2018 Database Project/RDS/DB.RData")
+
+# ____________ factor levels and labels____________
+comp_ids <- c("ASRSA001", "ASRSA054", "ASRSA056", "ASRSA019")
+comp_names <- c("Total Fund", "Credit", "Private Equity", "Real Estate")
+bench_names <- c("Total Fund", "LSTA", "ACWI", "ODCE")
+saa_tbl <- tibble(id = comp_ids, saa = c(1, .2, .105, .173))
+
+# __________ Benchmark Data _________
+# ____________ MYSS Data ___________
+bench_tbl <- read_excel(
+  "P:IMD/JohnD/MYSS Data/r.MYSS.daily.long.xlsm",
+  sheet = "10r.MYSS.daily.long",
+  col_types = c(
+    rep("skip", 3), "date", "text", 
+    rep("skip", 3), "numeric", rep("skip", 3), rep("numeric", 12))) %>%
+  distinct() %>% # __________ AWESOME WORK State Street 
+                 #_____ every line was duplicated since April 1st _______
+  arrange(`Account ID`, `Effective Date`) %>%
+  mutate(date = ymd(`Effective Date`)) %>%
+  filter(`Account ID` %in% comp_ids, date > ymd("2019-06-30")) %>% 
+  select(date, id = `Account ID`, nav = `Ending Market Value`,
+         b_day = `1 Day(Benchmark)`, b_month = `MTD(Benchmark)`, 
+         b_qtr = `QTD(Benchmark)`, b_fytd = `Fiscal YTD(Benchmark)`)
+# _____ truncate data by date ______
+# ________ and set max_date ________
+# ____last date of actual data______
+max_date <- bench_tbl %>% 
+  filter(id == "ASRSA001") %>% 
+  select(date) %>% unlist() %>% max() %>% as_date()
+bench_tbl <- bench_tbl %>% filter(date <= max_date)
+
+# _______ origional code that works______
+# ______________ ASRS Data ______________
+# asrs_long <- cbind.xts(
+#     cumprod(1 + b.all.daily$ASRSA001["2020-04-01/"]),
+#     cumprod(1 + b.all.daily$ASRSA054["2020-04-01/"]),
+#     cumprod(1 + b.all.daily$ASRSA019["2020-04-01/"]),
+#     cumprod(1 + b.all.daily$ASRSA056["2020-04-01/"])) %>% 
+#   rbind.xts(xts(matrix(rep(1, dim(.)[2]), 1, 4), order.by = ymd("2020-03-31"))) %>% 
+#   fortify.zoo(melt = TRUE, names = c("date", "id", "b_fytd")) %>% 
+#   tibble() %>% 
+#   mutate(id = factor(id, levels = comp_ids, labels = comp_names))
+
+# ________ Actual Quarterly Data _________
+actual_tbl <- bench_tbl %>% 
+  select(date, id, b_fytd) %>% 
+  mutate(b_fytd = 1 + b_fytd/100) %>% 
+  select(date, id, b_fytd)
+
+dummy_zero <- tibble(
+  date = ymd("2019-06-30"),
+  id = unique(actual_tbl$id),
+  b_fytd = 1)
+
+actual_tbl <- bind_rows(dummy_zero, actual_tbl) %>% 
+  arrange(id, date)
+
+# _________________ Multipliers ____________________
+# ________ these represent the QTD bench return ______
+# ____ also need to bolt together actual/future data____
+tf_multiplier <- actual_tbl %>% 
+  filter(date == max_date, id == "ASRSA001") %>% 
+  select(b_fytd) %>% as.double()
+credit_multiplier <- actual_tbl %>% 
+  filter(date == max_date, id == "ASRSA054") %>% 
+  select(b_fytd) %>% as.double()
+pe_multiplier <- actual_tbl %>% 
+  filter(date == max_date, id == "ASRSA056") %>% 
+  select(b_fytd) %>% as.double()
+re_multiplier <- actual_tbl %>% 
+  filter(date == max_date, id == "ASRSA019") %>% 
+  select(b_fytd) %>% as.double()
+
+# __________ Known May Daily Benchmark ________
+b_may <- tibble(
+  id = c("ASRSA054", "ASRSA056", "ASRSA019"),
+  # ____ from the MYSS excel spreadsheet ______
+  b_day = c(-0.05620829, -0.42432844, 0.02006500))
+
+# _____ create a tibble with known may daily returns _______
+# __________ I TRIPLE CHECKED WEEKEND/HOLIDAYS ___________
+may_tbl <- tibble(
+  date = as_date(ymd("2020-05-01"):ymd("2020-05-31"))[-c(2,3,9,10,16,17,23,24,25,30,31)]) %>% 
+  mutate(credit = 1 - 0.05620829/100, pe = 1 - 0.42432844/100, re = 1 + 0.020065/100) %>% 
+  select(date, credit, pe, re)
+
+# ___________ impute June daily Benchmark __________
+# _____ please double check for reasonableness _____
+b_june_acwi <- 1 - 14.364651/100
+b_june_lsta <- 1 - 12.3704/100 + 0.2059836/100 # monthly portion of +250
+b_june_odce <- 1 + .02/100
+
+# Test odce_test 
+
+jun_tbl <- tibble(
+  date = as_date(ymd("2020-06-01"):ymd("2020-06-30"))[-c(6,7,13,14,20,21,27,28)]) %>% 
+  mutate(credit = b_june_lsta ^ (1/22), pe = b_june_acwi ^ (1/22), re = b_june_odce ^ (1/22))
+
+# ____________ impute the daily denchmark ____________
+# ____________ bind May and June together ____________
+# ____________ cumprod the imputed returns ___________
+# _______ index the new returns to last actual _______
+
+impute_tbl <- bind_rows(may_tbl, jun_tbl) %>% 
+  filter(date > max_date) %>% # this truncates the data every time so cumprod is accurate
+  mutate(tf = (.20*credit) + (.105*pe) + (.173*re) + (.522*1)) %>% # 0.522 is balance of SAA at no return
+  arrange(date) %>% 
+  mutate("ASRSA001" = cumprod(tf) * tf_multiplier, 
+         "ASRSA054" = cumprod(credit) * credit_multiplier, 
+         "ASRSA056" = cumprod(pe) * pe_multiplier,
+         "ASRSA019" = cumprod(re) * re_multiplier) %>% 
+  select(date, "ASRSA001", "ASRSA054", "ASRSA056", "ASRSA019") %>% 
+  pivot_longer(cols = all_of(comp_ids), names_to = "id", values_to = "b_fytd") %>%
+  arrange(id, date)
+
+# __________ Known Final Private Benchmarks ________
+tf_final <- impute_tbl %>% 
+  filter(id == "ASRSA001", date == ymd("2020-06-30")) %>% 
+  select(b_fytd) %>% as.numeric()
+
+b_known_tbl <- tibble(
+  date = ymd("2020-06-30"),
+  id = comp_ids, 
+  b_final = c(tf_final, 1 - (9.16 - 2.50)/100, 1 - 12.45/100, 1 + 3.93/100))
+
+```
+
+
+```{r echo=FALSE}
+# __________ quick and dirty way to change ggplot labels ____________
+plot_one_actual <- actual_tbl %>%
+  mutate(id = factor(id, levels = comp_ids, labels = comp_names))
+plot_one_impute <- impute_tbl %>%
+  mutate(id = factor(id, levels = comp_ids, labels = comp_names))
+
+ggplot() + aes(x = date, y = b_fytd - 1, color = id) +
+  geom_point(data = filter(plot_one_actual, id != "Total Fund"), size = 1) + 
+  geom_point(data = filter(plot_one_impute, id != "Total Fund"), size = .25) +
+  geom_point(data = filter(plot_one_impute, id != "Total Fund", date == ymd("2020-06-30")), size = 2) +
+  geom_label_repel(data = filter(plot_one_impute, id != "Total Fund", date == ymd("2020-06-30")), 
+      aes(label = c("ODCE\n+3.9%", "LSTA+250\n-6.7%", "ACWI\n-12.5%")),
+      point.padding = .5, size = 3, show.legend = FALSE, min.segment.length = 0) +
+  ggtitle("Q2 Private Market Benchmark Returns") + #, subtitle = "Private Markets") +
+  ylab("") + xlab("") + 
+  scale_y_continuous(labels = scales::percent, limits = c(-.15, .15)) +
+  scale_x_date() +
+  scale_color_manual(values = IMD.palette()[-3]) +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        plot.subtitle = element_text(size = 9),
+        #plot.margin = margin(20, 0, 0, 0, "pt"),
+        axis.text.x = element_text(size = 8),
+        axis.text.y = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "right")
+```
+
+
+```{r echo=FALSE}
+# __________ quick and dirty way to change ggplot labels ____________
+plot_two_actual <- actual_tbl %>% 
+  mutate(id = factor(id, levels = comp_ids, labels = bench_names))
+plot_two_impute <- impute_tbl %>% 
+  mutate(id = factor(id, levels = comp_ids, labels = bench_names))
+
+# __________ label data for plotting __________
+saa_qtd <- plot_two_actual %>% 
+  filter(id == "Total Fund", date == max_date) %>% 
+  select(b_fytd) %>% unlist() %>% as.numeric() - 1
+saa_label_qtd <- paste0(
+  "SAA Benchmark\n", format.Date(max_date, "%d %b"), " = ",
+  format(100*saa_qtd, digits = 2), "%")
+saa_label_final <- paste0("SAA Benchmark\n30 June =  ", 
+  format(100*(tf_final - 1), digits = 2), "%\n +/- Public Markets")
+
+ggplot() + aes(x = date, y = b_fytd - 1, color = id, label = id) + 
+  # _____ good little trick when using multiple data sets in ggplot _____
+  #__________ always use a geom that has all factors first ______________
+  geom_point(data = filter(plot_two_impute, date == ymd("2020-06-30")), size = 2) +
+  geom_point(data = filter(plot_two_actual, id != "Total Fund"), size = .5) +
+  geom_point(data = filter(plot_two_impute, id != "Total Fund"), size = .25) +
+  geom_point(data = filter(plot_two_actual, id == "Total Fund"), size = 1.5) +
+  geom_point(data = filter(plot_two_impute, id == "Total Fund"), size = .75, alpha = .75) +
+  geom_label_repel(data = filter(plot_two_impute, date == ymd("2020-06-30")), 
+      aes(label = c(saa_label_final, "ODCE\n+3.9%", "LSTA+250\n-6.7%", "ACWI\n-12.5%")),
+      point.padding = .5, size = 3, show.legend = FALSE, min.segment.length = 0) +
+  geom_label_repel(data = filter(plot_two_actual, id == "Total Fund", date == max_date), 
+      aes(label = saa_label_qtd),
+      point.padding = .5, size = 3, show.legend = FALSE, min.segment.length = 0) +
+  ggtitle("SAA FYTD Benchmark - Impact of Private Markets") +
+  ylab("") + xlab("") + 
+  scale_y_continuous(labels = scales::percent, limits = c(-.25, .075)) +
+  scale_x_date() + #date_labels = "%d %b", limits = c(ymd("2020-03-31", NA))) +
+  scale_color_manual(values = c("dodgerblue4", rep("gray50", 3))) +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        plot.subtitle = element_text(size = 9),
+        #plot.margin = margin(20, 0, 0, 0, "pt"),
+        axis.text.x = element_text(size = 8),
+        axis.text.y = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "none")
+```
+
+
+```{r echo=FALSE}
+# __________ quick and dirty way to change ggplot labels ____________
+plot_two_actual <- actual_tbl %>% 
+  mutate(id = factor(id, levels = comp_ids, labels = bench_names))
+plot_two_impute <- impute_tbl %>% 
+  mutate(id = factor(id, levels = comp_ids, labels = bench_names))
+
+# __________ label data for plotting __________
+saa_qtd <- plot_two_actual %>% 
+  filter(id == "Total Fund", date == max_date) %>% 
+  select(b_fytd) %>% unlist() %>% as.numeric() - 1
+saa_label_qtd <- paste0(
+  "SAA Benchmark\n", format.Date(max_date, "%d %b"), " = ",
+  format(100*saa_qtd, digits = 2), "%")
+saa_label_final <- paste0("SAA Benchmark\n30 June =  ", 
+  format(100*(tf_final - 1), digits = 2), "%\n +/- Public Markets")
+
+ggplot() + aes(x = date, y = b_fytd - 1, color = id, label = id) + 
+  # _____ good little trick when using multiple data sets in ggplot _____
+  #__________ always use a geom that has all factors first ______________
+  geom_point(data = filter(plot_two_impute, date == ymd("2020-06-30")), size = 2) +
+  geom_point(data = filter(plot_two_actual, id != "Total Fund"), size = .5) +
+  geom_point(data = filter(plot_two_impute, id != "Total Fund"), size = .25) +
+  geom_point(data = filter(plot_two_actual, id == "Total Fund"), size = 1.5) +
+  geom_point(data = filter(plot_two_impute, id == "Total Fund"), size = .75, alpha = .75) +
+  geom_label_repel(data = filter(plot_two_impute, date == ymd("2020-06-30")), 
+      aes(label = c(saa_label_final, "ODCE\n+3.9%", "LSTA+250\n-6.7%", "ACWI\n-12.5%")),
+      point.padding = .5, size = 3, show.legend = FALSE, min.segment.length = 0) +
+  geom_label_repel(data = filter(plot_two_actual, id == "Total Fund", date == max_date), 
+      aes(label = saa_label_qtd),
+      point.padding = .5, size = 3, show.legend = FALSE, min.segment.length = 0) +
+  ggtitle("SAA FYTD Benchmark - Impact of Private Markets") +
+  ylab("") + xlab("") + 
+  scale_y_continuous(labels = scales::percent, limits = c(-.25, .075)) +
+  scale_x_date(date_labels = "%d %b", limits = c(ymd("2020-03-31", NA))) +
+  scale_color_manual(values = c("dodgerblue4", rep("gray50", 3))) +
+  theme(plot.title = element_text(size = 10, face = "bold"),
+        plot.subtitle = element_text(size = 9),
+        #plot.margin = margin(20, 0, 0, 0, "pt"),
+        axis.text.x = element_text(size = 8),
+        axis.text.y = element_text(size = 8),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "none")
+```
+
+
+
